@@ -1,9 +1,14 @@
+import os
+
 import torch
+from keras.src.metrics.accuracy_metrics import accuracy
 from torch.utils.tensorboard import SummaryWriter
 import shutil, glob, time
 
 # Basic Callback
 class Callback:
+    def on_train_start(self):
+        pass
     def on_epoch_end(self, epoch, logs=None):
         pass
     def on_train_end(self, logs=None):
@@ -13,13 +18,20 @@ class TensorBoardLogger(Callback):
     def __init__(self, base_log_dir = "runs/trial", clear_old = False):
         # Alte Ordner löschen
         if clear_old:
-            for folder in glob.glob(f"{base_log_dir}_*"):
-                shutil.rmtree(folder)
+            if os.path.exists(base_log_dir):
+                for item in os.listdir(base_log_dir):
+                    item_path = os.path.join(base_log_dir, item)
+                    if os.path.isdir(item_path):
+                        shutil.rmtree(item_path)
+                    else:
+                        os.remove(item_path)
 
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        log_dir = f"{base_log_dir}_{timestamp}"
+        log_dir = f"{base_log_dir}/run_{timestamp}"
         self.writer = SummaryWriter(log_dir)
         print(f"TensorBoard Logs: {self.writer.log_dir}")
+
+
 
     def on_train_start(self):
         print(f"TensorBoard Logs: {self.writer.log_dir}")
@@ -40,10 +52,25 @@ class Trainer:
         self.train_loader = train_loader
         self.test_loader = test_loader
         self.criterion = criterion
-        self.optimizer = optimizer
+        # Default: Adam optimizer
+        if optimizer is not None:
+            self.optimizer = optimizer
+        else:
+            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-3)
         # Ort (Hardware) der Berechnung; CPU, GPU
         self.device = device
         self.callbacks = callbacks or [] # Liste von Callbacks
+
+    def _log_model_graph(self):
+
+        # mockup = torch.randn(1, 10)
+        pass
+
+    # Save:
+    # torch.save(model, "full_model.pth")
+    # Load:
+    # model = torch.load("full_model.pth")
+    # model.eval()
 
     def train(self, num_epochs = 1):
         # Modell in den Trainingsmodus setzen
@@ -70,22 +97,24 @@ class Trainer:
                 running_loss += loss.item()
 
             avg_loss = running_loss / len(self.train_loader)
-            print(f"Epoch [{epoch + 1}/{num_epochs}] Loss: {avg_loss:.4f}")
+
+            accuracy = self.evaluate(silent = True)
+
+            print(f"Epoch [{epoch + 1}/{num_epochs}] Loss: {avg_loss:.4f} Accuracy: {accuracy:.4f}")
 
             # Logs für Tensorboard
-            logs = {'loss': avg_loss}
+            logs = {'loss': avg_loss, "accuracy": accuracy}
             for callback in self.callbacks:
                 callback.on_epoch_end(epoch, logs)
 
         for callback in self.callbacks:
             callback.on_train_end()
-            print("#######")
-            for cb in self.callbacks:
-                if hasattr(cb, "on_train_start"):
-                    cb.on_train_start()
-            print("########")
+            print("-------")
+            if hasattr(callback, "on_train_start"):
+                callback.on_train_start()
+            print("-------")
 
-    def evaluate(self):
+    def evaluate(self, silent = False):
         # Modell in den Evaluierungs- oder Predictmodeus versetzen
         self.model.eval()
 
@@ -116,7 +145,9 @@ class Trainer:
                 correct += (predicted == labels).sum().item()
 
         accuracy = 100 * correct / total
-        print(f"Accuracy: {accuracy:.2f}%")
+
+        if not silent:
+            print(f"Accuracy: {accuracy:.2f}%")
 
         return accuracy
 
