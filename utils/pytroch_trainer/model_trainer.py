@@ -1,5 +1,6 @@
 import torch
 from torch.utils.tensorboard import SummaryWriter
+import shutil, glob, time
 
 # Basic Callback
 class Callback:
@@ -9,9 +10,16 @@ class Callback:
         pass
 
 class TensorBoardLogger(Callback):
-    def __init__(self, log_dir):
-        #log_dir abfragen? Müsste eig auch so gehen
-        self.writer = SummaryWriter(log_dir=log_dir)
+    def __init__(self, base_log_dir = "runs/trial", clear_old = False):
+        # Alte Ordner löschen
+        if clear_old:
+            for folder in glob.glob(f"{base_log_dir}_*"):
+                shutil.rmtree(folder)
+
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        log_dir = f"{base_log_dir}_{timestamp}"
+        self.writer = SummaryWriter(log_dir)
+        print(f"TensorBoard Logs: {self.writer.log_dir}")
 
     def on_train_start(self):
         print(f"TensorBoard Logs: {self.writer.log_dir}")
