@@ -61,15 +61,15 @@ class TensorBoardLogger(Event):
 # -------------------------
 class PipelineConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
-
     model: nn.Module
+
     train_loader: DataLoader
     test_loader: DataLoader
-    criterion: nn.Module
+    criterion: nn.Module = nn.CrossEntropyLoss()
     optimizer: optim.Optimizer
     device: str = "cpu"
     scheduler: Optional[optim.lr_scheduler.LRScheduler] = None
-    events: List[Event] = Field(default_factory=list)
+    events: Optional[List[Event]] = Field(default_factory=list)
 
 
 # -------------------------
@@ -194,9 +194,7 @@ if __name__ == "__main__":
         test_loader=test_loader,
         criterion=criterion,
         optimizer=optimizer,
-        scheduler=scheduler,
-        device="cpu",
-        events=[TensorBoardLogger()]
+        device="cpu"
     )
 
     pipeline = Pipeline(config)
