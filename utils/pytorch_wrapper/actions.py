@@ -93,3 +93,7 @@ class LoadModel(Action):
             loaded_model = torch.load(self.filepath, map_location=pipeline.device)
             pipeline.model = loaded_model.to(pipeline.device)
             print(f"[LoadModel] Entire model loaded from {self.filepath}")
+
+class PrintConv2D(Action):
+    def execute(self, pipeline, **kwargs):
+        pass
