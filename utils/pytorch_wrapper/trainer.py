@@ -6,10 +6,12 @@ class Trainer:
 
     def train(self, num_epochs):
         for epoch in range(num_epochs):
-            # Example: dynamically freeze the first layer for the first 2 epochs
-            if epoch < 2:
+            # Example: dynamically freeze the first layer at index 1
+            if epoch > 3:
+                print("check")
                 self.pipeline.model.set_freeze(layer_names=["fc1"], freeze=True)
             else:
+                print("continue")
                 self.pipeline.model.set_freeze(layer_names=["fc1"], freeze=False)
 
             self.pipeline.run_action("train_epoch", epoch=epoch)

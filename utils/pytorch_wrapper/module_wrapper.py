@@ -28,7 +28,7 @@ class InteractiveModule(nn.Module):
                 if name in self._name_to_module:
                     targets.append(self._name_to_module[name])
 
-        targets = self._name_to_module.values() if layer_names is None else [self._name_to_module[name] for name in layer_names if name in self._name_to_module]
+        #targets = self._name_to_module.values() if layer_names is None else [self._name_to_module[name] for name in layer_names if name in self._name_to_module]
         for module in targets:
             for param in module.parameters(recurse=True):
                 param.requires_grad = not freeze

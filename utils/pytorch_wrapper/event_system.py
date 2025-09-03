@@ -76,6 +76,7 @@ class ModelCheckpoint(Event):
             torch.save(model.state_dict(), filepath)
             print(f"[Checkpoint] Model saved to {filepath}")
 
+#TODO: duplicate in actions.py
 class MetricsLogger(Event):
     # Logs loss and accuracy at the end of each epoch
     def on_event(self, event_name: str, **kwargs):

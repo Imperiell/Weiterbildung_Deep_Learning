@@ -33,6 +33,7 @@ class TrainEpoch(Action):
         avg_loss = running_loss / len(pipeline.train_loader)
         pipeline.trigger_event("epoch_end", epoch=epoch, loss=avg_loss, pipeline=pipeline)
 
+#TODO: Add event
 class Evaluate(Action):
     def execute(self, pipeline, **kwargs):
         model = pipeline.model
