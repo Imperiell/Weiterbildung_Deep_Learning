@@ -19,13 +19,16 @@ if __name__ == "__main__":
     seq_model = nn.Sequential(
         nn.Linear(20, 64),
         nn.ReLU(),
+        nn.Sequential(
+            nn.Linear(64, 64),
+            nn.ReLU()
+        ),
         nn.Linear(64, 2)
     )
     model = InteractiveModule(seq_model)
+
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     criterion = nn.CrossEntropyLoss()
-
-    #model.set_freeze(True, layer_names=["relu"])
 
     # Pipeline & Actions
     pipeline = Pipeline(model, optimizer, train_loader, test_loader, criterion, device="cpu")
