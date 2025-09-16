@@ -1,3 +1,5 @@
+import os
+
 import torch
 from torch import nn, optim
 from torchvision import datasets, transforms
@@ -6,13 +8,16 @@ import matplotlib.pyplot as plt
 from torchdiffeq import odeint
 import torch.nn.functional as F
 
+# KI für Konzeption und Debugging des Codes verwendet.
+# Adaptionen aus Papers oder anderen Quellen sind an entsprechender Stelle vermerkt.
+
 #TODO: Nummerierung
 
 # -----------------------------
 # 1. Sinusoidal Time Embedding
 # -----------------------------
 
-# warum kein RNN
+# warum kein RNN -> unstabiler
 
 """
 Die Zeit ist eine kontinuierliche Variable t E [0,1], die durch ein lineares Einbetten oft nicht
@@ -23,6 +28,8 @@ Mit jeder Frequenz wird eine andere Zeitskala codiert.
 
 -> Zusammenfassung:
 Auf diese Weise lässt sich das Modell auf unterschiedliche "Abtastraten" konditionieren.
+
+vgl.: "Attention is All You Need"; https://arxiv.org/abs/1706.03762 ; Kapitel 3.5
 """
 def sinusoidal_embedding(t, dim=128):
     # Dimension des Zeit-Embeddings, also wie viele Zahlen pro Zeitpunkt erzeugt werden sollen.
@@ -61,8 +68,7 @@ class ResidualBlock(nn.Module):
         super().__init__()
         self.model = nn.Sequential(
             nn.Conv2d(in_channel, out_channel, 3, padding = 1),
-            nn.Conv2d(out_channel, out_channel, 3, padding = 1),
-            nn.LeakyReLU()
+            nn.Conv2d(out_channel, out_channel, 3, padding = 1)
         )
         self.skip = nn.Conv2d(in_channel, out_channel, 1) if in_channel != out_channel else nn.Identity()
 
@@ -110,7 +116,7 @@ class ConditionalVelocityNet(nn.Module):
 
         # Feature Flow
         h = self.encoder(x_t)
-        h = h + t_emb + y_emb
+        h = h + t_emb + y_emb # Latent space
         h = self.decoder(h)
 
         return h
@@ -119,17 +125,40 @@ class ConditionalVelocityNet(nn.Module):
 # ODE - Ordinary Differntial Equations
 # -----------------------------
 class ODEFunc(nn.Module):
-    def __init__(self, model):
+    def __init__(self, model, label):
         super().__init__()
         self.model = model
+        self.label = label
 
     def forward(self, t, x):
-        tb = t.expand(x.size(0), 1)
-        return self.model(x, tb)
+        tb = t.expand(x.size(0), 1) # Skalar Zeit `t` wird in die Form [batch_size, 1] gebracht
+        return self.model(x, tb, self.label)
+
+# -----------------------------
+# Speichern und Laden des Modells
+# -----------------------------
+def save_checkpoint(model, optimizer, epoch, filepath):
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    checkpoint = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict()
+    }
+    torch.save(checkpoint, filepath)
+    print(f"Checkpoint saved at epoch {epoch} -> {filepath}")
+
+def load_checkpoint(model, optimizer, filepath, device='cpu'):
+    checkpoint = torch.load(filepath, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    start_epoch = checkpoint['epoch'] + 1  # nächste epoch starten
+    print(f"Checkpoint loaded from {filepath}, resuming at epoch {start_epoch}")
+    return start_epoch
 
 # -----------------------------
 # 4. Daten
 # -----------------------------
+# TODO: Normalisieren im NN
 transform = transforms.Compose([
     transforms.ToTensor(),
     # transforms.Normalize((0.5,), (0.5,))
@@ -149,10 +178,24 @@ optimizer = optim.AdamW(model.parameters(), lr = 1e-4)
 
 num_epochs = 5
 
+filepath = './model/cfmvr_checkpoint.pth'
+
 # -----------------------------
 # 6. Trainings Loop
 # -----------------------------
-for epoch in range(num_epochs):
+"""
+vgl.: "FLow Matching for Generative Modeling"; https://www.youtube.com/watch?v=7NNxK3CqaDk
+"""
+if os.path.exists(filepath):
+    global_epoch = load_checkpoint(model, optimizer, filepath, device=device)
+else:
+    print("No checkpoint found, starting from scratch.")
+    global_epoch = 0
+    save_checkpoint(model, optimizer, global_epoch, filepath)
+
+total_epochs = global_epoch + num_epochs
+
+for epoch in range(global_epoch, global_epoch + num_epochs):
     model.train()
     total_loss = 0.0
 
@@ -167,7 +210,7 @@ for epoch in range(num_epochs):
         t = torch.rand(x1.size(0), 1, device = device)
 
         # Lineare Interpolation zwischen x0 und x1
-        x_t = (1 - t.view(-1, 1, 1, 1)) * x0 + t.view(-1, 1, 1, 1) + x1
+        x_t = (1 - t.view(-1, 1, 1, 1)) * x0 + t.view(-1, 1, 1, 1) * x1
 
         # Zielgeschwindigkeitsvektor
         v_target = x1 - x0
@@ -189,7 +232,11 @@ for epoch in range(num_epochs):
 
         total_loss += loss.item() * x1.size(0)
 
-    print(f"Epoch {epoch+1}/{num_epochs}, Loss: {total_loss/len(train_loader.dataset):.6f}")
+    avg_loss = total_loss / len(train_loader.dataset)
+    print(f"Epoch {epoch + 1}/{total_epochs}, Loss: {avg_loss:.6f}")
+
+    if (epoch + 1) % 5 == 0:
+        save_checkpoint(model, optimizer, epoch + 1, filepath)
 
 # -----------------------------
 # 7. Sampling via ODE (conditional)
@@ -205,7 +252,7 @@ def sample_flow_ode_cond(model, y_label, steps = 200, method = 'dopri5'):
 
     y = torch.tensor([y_label], device = device)
 
-    ode_func = ODEFunc(model)
+    ode_func = ODEFunc(model, y)
 
     x_sequence = odeint(ode_func, x0, t_span, method = method)
 
