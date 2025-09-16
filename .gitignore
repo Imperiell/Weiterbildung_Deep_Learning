@@ -9,6 +9,7 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+utils/flow_matching/data/
 develop-eggs/
 dist/
 downloads/

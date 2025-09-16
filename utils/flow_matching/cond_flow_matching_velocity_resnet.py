@@ -1,5 +1,4 @@
 import os
-from tabnanny import verbose
 
 import torch
 from torch import nn, optim
@@ -15,7 +14,7 @@ import torch.nn.functional as F
 #TODO: Nummerierung
 
 # -----------------------------
-# 1. Sinusoidal Time Embedding
+# Sinusoidal Time Embedding
 # -----------------------------
 
 # warum kein RNN -> unstabiler
@@ -31,6 +30,7 @@ Mit jeder Frequenz wird eine andere Zeitskala codiert.
 Auf diese Weise lässt sich das Modell auf unterschiedliche "Abtastraten" konditionieren.
 
 vgl.: "Attention is All You Need"; https://arxiv.org/abs/1706.03762 ; Kapitel 3.5
+vgl.: "Inside Sinusoidal Position Embeddings: A Sense of Order"; https://learnopencv.com/sinusoidal-position-embeddings/?utm_source=chatgpt.com
 """
 def sinusoidal_embedding(t, dim=128):
     # Dimension des Zeit-Embeddings, also wie viele Zahlen pro Zeitpunkt erzeugt werden sollen.
@@ -53,7 +53,7 @@ def sinusoidal_embedding(t, dim=128):
     return torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1) # [B, dim]
 
 # -----------------------------
-# 2. Residual Block
+# Residual Block
 # -----------------------------
 """
 Warum Residual Blöcke?
@@ -79,7 +79,7 @@ class ResidualBlock(nn.Module):
         return F.leaky_relu(self.model(x) + self.skip(x), negative_slope=0.01)
 
 # -----------------------------
-# 3. Conditional Velocity Net
+# Conditional Velocity Net
 # -----------------------------
 class ConditionalVelocityNet(nn.Module):
     def __init__(self, num_classes = 10, time_dim = 128, latent_dim = 128): # latent_dim
@@ -155,6 +155,66 @@ class ODEFunc(nn.Module):
         return self.model(x, tb, self.label)
 
 # -----------------------------
+# AdaptiveScheduler
+# -----------------------------
+class AdaptiveScheduler:
+    def __init__(self, optimizer, step_size=2, step_gamma=0.5,
+                 plateau_factor=0.5, plateau_patience=1,
+                 cosine_Tmax=5, overshoot_thresh=1.05, plateau_thresh=1e-4):
+        """
+        Adaptive Kombination von StepLR, ReduceLROnPlateau und CosineAnnealingLR.
+        - StepLR: Standardfall
+        - ReduceLROnPlateau: wenn der Loss stagniert
+        - CosineAnnealingLR: wenn Overshooting erkannt wird
+        """
+        self.optimizer = optimizer
+
+        # Scheduler Instanzen
+        self.step_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=step_gamma)
+        self.plateau_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=plateau_factor, patience=plateau_patience
+        )
+        self.cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cosine_Tmax)
+
+        # Tracking
+        self.best_loss = float('inf')
+        self.plateau_count = 0
+        self.overshoot_detected = False
+        self.active_scheduler = self.step_scheduler
+
+        # Parameter
+        self.overshoot_thresh = overshoot_thresh
+        self.plateau_thresh = plateau_thresh
+
+    def step(self, loss: float):
+        """Aktualisiert Scheduler-Strategie anhand des Loss"""
+        if loss < self.best_loss - self.plateau_thresh:
+            self.best_loss = loss
+            self.plateau_count = 0
+            self.overshoot_detected = False
+        elif loss > self.best_loss * self.overshoot_thresh:
+            self.overshoot_detected = True
+        else:
+            self.plateau_count += 1
+
+        # Scheduler wählen
+        if self.overshoot_detected:
+            self.active_scheduler = self.cosine_scheduler
+        elif self.plateau_count > 3: # evtl. als variable auslagern
+            self.active_scheduler = self.plateau_scheduler
+        else:
+            self.active_scheduler = self.step_scheduler
+
+        if isinstance(self.active_scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+            self.active_scheduler.step(loss) # Brauch loss als Parameter
+        else:
+            self.active_scheduler.step()
+
+    def get_lr(self):
+        """Aktuelle Lernrate zurückgeben"""
+        return self.optimizer.param_groups[0]['lr']
+
+# -----------------------------
 # Speichern und Laden des Modells
 # -----------------------------
 def save_checkpoint(model, optimizer, epoch, filepath):
@@ -171,12 +231,12 @@ def load_checkpoint(model, optimizer, filepath, device='cpu'):
     checkpoint = torch.load(filepath, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    start_epoch = checkpoint['epoch'] + 1  # nächste epoch starten
+    start_epoch = checkpoint['epoch'] #+ 1  # nächste epoch starten
     print(f"Checkpoint loaded from {filepath}, resuming at epoch {start_epoch}")
     return start_epoch
 
 # -----------------------------
-# 4. Daten
+# Daten
 # -----------------------------
 # TODO: Normalisieren im NN
 transform = transforms.Compose([
@@ -189,7 +249,7 @@ train_dataset = datasets.MNIST(root='./data/mnist', train=True, download=False, 
 train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
 
 # -----------------------------
-# 5. Hyperparameter
+# Hyperparameter/Parameter
 # -----------------------------
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model = ConditionalVelocityNet().to(device)
@@ -201,7 +261,7 @@ num_epochs = 5
 filepath = './model/cfmvr_checkpoint.pth'
 
 # -----------------------------
-# 6. Trainings Loop
+# Trainings Loop
 # -----------------------------
 """
 vgl.: "FLow Matching for Generative Modeling"; https://www.youtube.com/watch?v=7NNxK3CqaDk
@@ -217,13 +277,15 @@ total_epochs = global_epoch + num_epochs
 
 # IDEE: Scheduler phasenweise und performanceabhängig -> TESTEN, ob sinnvoll!
 # Schnelleres Lernen grober Features vor feinerer Anpassung.
-step_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size = 2, gamma = 0.5)
+#step_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size = 2, gamma = 0.5) # gamma = lr senkung -> evtl 0.1
 # Stagniert der Loss über mehrere Epochen, wird die Lernrate angepasst.
 # Das Modell kann kleine Geschwindigkeitsänderungen präziser lernen, ohne dass die Lernrate zu groß ist.
-plateau_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode = "min", factor = 0.5, patience = 2)
+#plateau_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode = "min", factor = 0.5, patience = 2) # factor entspricht ca gamma
 # Gegen Ende des Trainings kann die Lernrate gegen 0 konvergieren, um Overshooting zu verhindern
 # und die finale Gewichtsanpassung zu stabilisieren.
-cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max = 5)
+#cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max = 5)
+
+scheduler = AdaptiveScheduler(optimizer)
 
 for epoch in range(global_epoch, global_epoch + num_epochs):
     model.train()
@@ -265,19 +327,22 @@ for epoch in range(global_epoch, global_epoch + num_epochs):
     avg_loss = total_loss / len(train_loader.dataset)
     print(f"Epoch {epoch + 1}/{total_epochs}, Loss: {avg_loss:.6f}")
 
-    if (epoch + 1) % 5 == 0:
-        save_checkpoint(model, optimizer, epoch, filepath)
+    scheduler.step(avg_loss)
 
-    match epoch:
+    checkpoint_threshold = epoch + 1
+    if checkpoint_threshold % 5 == 0:
+        save_checkpoint(model, optimizer, checkpoint_threshold, filepath)
+
+    """match epoch:
         case e if 0 <= e <= 4:
             step_scheduler.step()
         case e if 5 <= e <= 14:
             plateau_scheduler.step(avg_loss)
         case e if 15 <= e <= 19:
-            cosine_scheduler.step()
+            cosine_scheduler.step()"""
 
 # -----------------------------
-# 7. Sampling via ODE (conditional)
+# Sampling via ODE (conditional)
 # -----------------------------
 @torch.no_grad()
 def sample_flow_ode_cond(model, y_label, steps = 200, method = 'dopri5'):
@@ -286,6 +351,7 @@ def sample_flow_ode_cond(model, y_label, steps = 200, method = 'dopri5'):
     # Zufällige Startverteilung
     x0 = torch.randn(1, 1, 28, 28, device=device)
 
+    # Zeitspanne in steps einteilen
     t_span = torch.linspace(0.0, 1.0, steps, device = device)
 
     y = torch.tensor([y_label], device = device)
