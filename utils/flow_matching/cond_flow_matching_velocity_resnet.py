@@ -1,4 +1,5 @@
 import os
+from tabnanny import verbose
 
 import torch
 from torch import nn, optim
@@ -8,7 +9,7 @@ import matplotlib.pyplot as plt
 from torchdiffeq import odeint
 import torch.nn.functional as F
 
-# KI für Konzeption und Debugging des Codes verwendet.
+# KI für Konzeption (Komponenten und Schritte planen) und Debugging des Codes verwendet.
 # Adaptionen aus Papers oder anderen Quellen sind an entsprechender Stelle vermerkt.
 
 #TODO: Nummerierung
@@ -68,7 +69,9 @@ class ResidualBlock(nn.Module):
         super().__init__()
         self.model = nn.Sequential(
             nn.Conv2d(in_channel, out_channel, 3, padding = 1),
-            nn.Conv2d(out_channel, out_channel, 3, padding = 1)
+            nn.BatchNorm2d(out_channel), # In forward() finden Additionen statt, daher Werte in ResidualBlock stabilisieren.
+            nn.Conv2d(out_channel, out_channel, 3, padding = 1),
+            nn.BatchNorm2d(out_channel)
         )
         self.skip = nn.Conv2d(in_channel, out_channel, 1) if in_channel != out_channel else nn.Identity()
 
@@ -96,13 +99,21 @@ class ConditionalVelocityNet(nn.Module):
 
         self.encoder = nn.Sequential(
             nn.Conv2d(1, 32, 3, padding = 1),
+            # Rohaktivierungen können noch stark skaliert sein, um die Feature-Maps zu stabilisieren -> BatchNorm2d
+            nn.BatchNorm2d(32),
             ResidualBlock(32, 64),
+            # Dropout, um eine Überanpassung der frühen Feature-Mapss zuvermeiden.
+            # Ziel: Das Netz soll robuste und redundante Features lernen.
+            nn.Dropout2d(0.1),
             ResidualBlock(64, latent_dim)
         )
 
+        # KEIN Dropout! Kann Bilder verrauschen.
         self.decoder = nn.Sequential(
             ResidualBlock(latent_dim, 64),
+            nn.BatchNorm2d(64),
             ResidualBlock(64, 32),
+            nn.BatchNorm2d(32),
             nn.Conv2d(32,1, 3, padding = 1)
         )
 
@@ -116,7 +127,16 @@ class ConditionalVelocityNet(nn.Module):
 
         # Feature Flow
         h = self.encoder(x_t)
-        h = h + t_emb + y_emb # Latent space
+        # Latent Space
+        h = h + t_emb + y_emb
+        # Im Latent space werden der Aktivierung die Informationen von Zeit- und Label-Embedding hinzugefügt.
+        # Um zu vermeiden, dass das Modell zu stark auf einzelne Dimensionen der Embeddings reagiert -> Dropout.
+        # Dropoutrate gering halten, um die Robustheit gegenüber kleinsten Variantionen in t oder label zu erhöhen.
+        # Erweitert den Möglchkeitsraum des Latent space etwas und stabilisiert die Konditionierung,
+        # indem mehr Variablität erzwungen wird. (Variablität erhöht sich, da verschiedene Subsets der Features
+        # genutzt werden müssen. "Lockert den Latent space etwas auf".)
+        h = F.dropout(h, p=0.05, training = self.training)
+        # Latent Space end
         h = self.decoder(h)
 
         return h
@@ -195,6 +215,16 @@ else:
 
 total_epochs = global_epoch + num_epochs
 
+# IDEE: Scheduler phasenweise und performanceabhängig -> TESTEN, ob sinnvoll!
+# Schnelleres Lernen grober Features vor feinerer Anpassung.
+step_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size = 2, gamma = 0.5)
+# Stagniert der Loss über mehrere Epochen, wird die Lernrate angepasst.
+# Das Modell kann kleine Geschwindigkeitsänderungen präziser lernen, ohne dass die Lernrate zu groß ist.
+plateau_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode = "min", factor = 0.5, patience = 2)
+# Gegen Ende des Trainings kann die Lernrate gegen 0 konvergieren, um Overshooting zu verhindern
+# und die finale Gewichtsanpassung zu stabilisieren.
+cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max = 5)
+
 for epoch in range(global_epoch, global_epoch + num_epochs):
     model.train()
     total_loss = 0.0
@@ -236,7 +266,15 @@ for epoch in range(global_epoch, global_epoch + num_epochs):
     print(f"Epoch {epoch + 1}/{total_epochs}, Loss: {avg_loss:.6f}")
 
     if (epoch + 1) % 5 == 0:
-        save_checkpoint(model, optimizer, epoch + 1, filepath)
+        save_checkpoint(model, optimizer, epoch, filepath)
+
+    match epoch:
+        case e if 0 <= e <= 4:
+            step_scheduler.step()
+        case e if 5 <= e <= 14:
+            plateau_scheduler.step(avg_loss)
+        case e if 15 <= e <= 19:
+            cosine_scheduler.step()
 
 # -----------------------------
 # 7. Sampling via ODE (conditional)
