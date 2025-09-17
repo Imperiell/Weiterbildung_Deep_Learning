@@ -11,13 +11,143 @@ import torch.nn.functional as F
 # KI für Konzeption (Komponenten und Schritte planen) und Debugging des Codes verwendet.
 # Adaptionen aus Papers oder anderen Quellen sind an entsprechender Stelle vermerkt.
 
-#TODO: Nummerierung
+#############################
+#############################
+# ÄNDERUNGEN für Version 2
+#############################
+#############################
+# Der gesamte Code ist jetzt an die Verwendung von Named Tensors angepasst.
+#############################
+#############################
+#TODO: Ideen für Verbesserungen:
+# lr Tuning
+# Scheduler feinjustieren
+# Loss anpassen -> kombinierte Loss?
+# Batchsize anpassen
+# Regularisierung anpassen -> Weight Decay, Dropout etc
+# Latent Space -> Gewichte/ Priorisierung?
+# UNet?
+# Tiefer?
+
+# -----------------------------
+# NamedTensor Wrapper
+# -----------------------------
+class NamedTensor:
+    def __init__(self, tensor: torch.Tensor, names: tuple[str, ...]):
+        if tensor.ndim != len(names):
+            raise ValueError(f"Expected {len(names)} dimensions, got {tensor.ndim}")
+        self.tensor = tensor
+        self.names = names
+
+    def __repr__(self):
+        return f"NamedTensor(names={self.names}, shape={tuple(self.tensor.shape)})"
+
+    def __getattr__(self, attr):
+        """
+        Unbekannte Attribute werden an den inneren Tensor weitergeleitet.
+        Ist das Ergebnis ein Tensor, wrappe es neu.
+        """
+        t_attr = getattr(self.tensor, attr)
+
+        if callable(t_attr):
+            def wrapper(*args, **kwargs):
+                result = t_attr(*args, **kwargs)
+
+                # Fallback: Namen beibehalten
+                if isinstance(result, torch.Tensor):
+                    return NamedTensor(result, self.names[:result.ndim])
+                return result
+
+            return wrapper
+        else:
+            return t_attr
+
+    # Zugriff auf rohe Tensoren
+    def raw(self):
+        return self.tensor
+
+    # Hilfsfunktionen für Namen
+    def dim_index(self, name: str) -> int:
+        return self.names.index(name)
+
+    def rename(self, **rename_map):
+        new_names = tuple(rename_map.get(n, n) for n in self.names)
+        return NamedTensor(self.tensor, new_names)
+
+    def permute(self, *order):
+        # permute nach Namen oder Indizes
+        if all(isinstance(x, str) for x in order):
+            indices = [self.dim_index(n) for n in order]
+            new_names = order
+        else:
+            indices = order
+            new_names = tuple(self.names[i] for i in indices)
+
+        result = self.tensor.permute(*indices)
+        return NamedTensor(result, new_names)
+
+    def mean(self, dim=None, *args, **kwargs):
+        # Mean mit Namen
+        if isinstance(dim, str):
+            dim = self.dim_index(dim)
+        result = self.tensor.mean(dim=dim, *args, **kwargs)
+        if dim is None:
+            return NamedTensor(result, ())
+        else:
+            new_names = self.names[:dim] + self.names[dim+1:]
+            return NamedTensor(result, new_names)
+
+    # Operatoren
+    def __add__(self, other):
+        if isinstance(other, NamedTensor):
+            # naive Variante: gleiche Reihenfolge annehmen
+            return NamedTensor(self.tensor + other.tensor, self.names)
+        return NamedTensor(self.tensor + other, self.names)
+
+    def __sub__(self, other):
+        if isinstance(other, NamedTensor):
+            return NamedTensor(self.tensor - other.tensor, self.names)
+        return NamedTensor(self.tensor - other, self.names)
+
+    def __mul__(self, other):
+        if isinstance(other, NamedTensor):
+            return NamedTensor(self.tensor * other.tensor, self.names)
+        return NamedTensor(self.tensor * other, self.names)
+
+    def __truediv__(self, other):
+        if isinstance(other, NamedTensor):
+            return NamedTensor(self.tensor / other.tensor, self.names)
+        return NamedTensor(self.tensor / other, self.names)
+
+    def __getitem__(self, item):
+        result = self.tensor[item]
+        new_names = self.names[:result.ndim]
+        return NamedTensor(result, new_names)
+
+"""
+# --- Beispiel ---
+x = NamedTensor(torch.randn(10, 20, 32), ("batch", "time", "features"))
+print(x)
+
+# Mittelwert über Dimension
+m = x.mean("time")
+print(m)
+
+# Permute nach Namen
+p = x.permute("features", "batch", "time")
+print(p)
+
+# Addition mit normalem Tensor
+y = torch.randn(10, 20, 32)
+z = x + y
+print(z)
+"""
 
 # -----------------------------
 # Sinusoidal Time Embedding
 # -----------------------------
 
-# warum kein RNN -> unstabiler
+# warum kein RNN -> instabiler
 
 """
 Die Zeit ist eine kontinuierliche Variable t E [0,1], die durch ein lineares Einbetten oft nicht
@@ -97,7 +227,7 @@ class ConditionalVelocityNet(nn.Module):
 
         self.label_emb = nn.Embedding(num_classes, 128)
 
-        self.encoder = nn.Sequential(
+        self.encoder_layers = nn.ModuleList([
             nn.Conv2d(1, 32, 3, padding = 1),
             # Rohaktivierungen können noch stark skaliert sein, um die Feature-Maps zu stabilisieren -> BatchNorm2d
             nn.BatchNorm2d(32),
@@ -106,52 +236,61 @@ class ConditionalVelocityNet(nn.Module):
             # Ziel: Das Netz soll robuste und redundante Features lernen.
             nn.Dropout2d(0.1),
             ResidualBlock(64, latent_dim)
-        )
+        ])
 
         # KEIN Dropout! Kann Bilder verrauschen.
-        self.decoder = nn.Sequential(
+        self.decoder_layers = nn.ModuleList([
             ResidualBlock(latent_dim, 64),
             nn.BatchNorm2d(64),
             ResidualBlock(64, 32),
             nn.BatchNorm2d(32),
             nn.Conv2d(32,1, 3, padding = 1)
-        )
+        ])
 
-    def forward(self, x_t, t, label):
-        # Zeit Embedding, für Latent space
-        t_emb = sinusoidal_embedding(t)
-        t_emb = self.time_projection(t_emb).unsqueeze(-1).unsqueeze(-1)
-
-        # Label Embedding, für Latent space
-        y_emb = self.label_emb(label).unsqueeze(-1).unsqueeze(-1)
-
-        # Feature Flow
-        h = self.encoder(x_t)
-        # Latent Space
-        h = h + t_emb + y_emb
-        # Im Latent space werden der Aktivierung die Informationen von Zeit- und Label-Embedding hinzugefügt.
-        # Um zu vermeiden, dass das Modell zu stark auf einzelne Dimensionen der Embeddings reagiert -> Dropout.
-        # Dropoutrate gering halten, um die Robustheit gegenüber kleinsten Variantionen in t oder label zu erhöhen.
-        # Erweitert den Möglchkeitsraum des Latent space etwas und stabilisiert die Konditionierung,
-        # indem mehr Variablität erzwungen wird. (Variablität erhöht sich, da verschiedene Subsets der Features
-        # genutzt werden müssen. "Lockert den Latent space etwas auf".)
-        h = F.dropout(h, p=0.05, training = self.training)
-        # Latent Space end
-        h = self.decoder(h)
-
+    def encode(self, x:NamedTensor) -> NamedTensor:
+        h = x
+        for layer in self.encoder_layers:
+            #TODO: tupel anpassen
+            h = NamedTensor(layer(h.raw()), ("batch", "features", "height", "width"))
         return h
+
+    def decode(self, h: NamedTensor) -> NamedTensor:
+        for layer in self.decoder_layers:
+            h = NamedTensor(layer(h.raw()),
+                            ("batch", "features" if layer != self.decoder_layers[-1] else "channel", "height", "width"))
+        return h
+
+    def forward(self, x_t: NamedTensor, t: NamedTensor, label: NamedTensor) -> NamedTensor:
+        h = self.encode(x_t)
+
+        # Zeit Embedding
+        t_emb = sinusoidal_embedding(t.raw())  # [batch, time_dim]
+        t_emb = self.time_projection(t_emb).unsqueeze(-1).unsqueeze(-1)
+        t_emb = NamedTensor(t_emb, ("batch", "features", "height", "width"))
+
+        # Label Embedding
+        y_emb = self.label_emb(label.raw()).unsqueeze(-1).unsqueeze(-1)
+        y_emb = NamedTensor(y_emb, ("batch", "features", "height", "width"))
+
+        # Latent + Embeddings
+        h = h + t_emb + y_emb
+        h = NamedTensor(F.dropout(h.raw(), p=0.05, training=self.training),
+                        ("batch", "features", "height", "width"))
+
+        out = self.decode(h)
+        return out
 
 # -----------------------------
 # ODE - Ordinary Differntial Equations
 # -----------------------------
 class ODEFunc(nn.Module):
-    def __init__(self, model, label):
+    def __init__(self, model, label: NamedTensor):
         super().__init__()
         self.model = model
         self.label = label
 
-    def forward(self, t, x):
-        tb = t.expand(x.size(0), 1) # Skalar Zeit `t` wird in die Form [batch_size, 1] gebracht
+    def forward(self, t, x: NamedTensor):
+        tb = NamedTensor(t.expand(x.raw().size(0), 1), ("batch", "time"))
         return self.model(x, tb, self.label)
 
 # -----------------------------
@@ -229,22 +368,27 @@ def save_checkpoint(model, optimizer, epoch, filepath):
 
 def load_checkpoint(model, optimizer, filepath, device='cpu'):
     checkpoint = torch.load(filepath, map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    start_epoch = checkpoint['epoch'] #+ 1  # nächste epoch starten
-    print(f"Checkpoint loaded from {filepath}, resuming at epoch {start_epoch}")
+    start_epoch = checkpoint['epoch']
+
+    try:
+        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        print(f"Checkpoint loaded (partial) from {filepath}, resuming at epoch {start_epoch}")
+    except RuntimeError as e:
+        print(f"Warning: Could not fully load checkpoint: {e}")
+        print("Model weights will be partially loaded or reinitialized.")
+
+    try:
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        print("Optimizer state loaded.")
+    except Exception as e:
+        print(f"Warning: Could not load optimizer state: {e}")
+
     return start_epoch
 
 # -----------------------------
 # Daten
 # -----------------------------
-# TODO: Normalisieren im NN
-transform = transforms.Compose([
-    transforms.ToTensor(),
-    # transforms.Normalize((0.5,), (0.5,))
-    # ACHTUNG: Pixel beim Decodieren auf [0,1] zurücktranformieren
-    # x_gen = (x_gen + 1) / 2  # [-1,1] -> [0,1]
-])
+transform = transforms.Compose([transforms.ToTensor()])
 train_dataset = datasets.MNIST(root='./data/mnist', train=True, download=False, transform=transform)
 train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
 
@@ -259,6 +403,30 @@ optimizer = optim.AdamW(model.parameters(), lr = 1e-4)
 num_epochs = 5
 
 filepath = './model/cfmvr_checkpoint.pth'
+
+# Named Dimensions
+DIM_BATCH = "batch"
+DIM_CHANNEL = "channel"
+DIM_HEIGHT = "height"
+DIM_WIDTH = "width"
+DIM_TIME = "time"
+
+# -----------------------------
+# Bild Generierung
+# -----------------------------
+def generate_image(model, y_labels: list[int]):
+    images = []
+    for label in y_labels:
+        # Bild generieren
+        sample = sample_flow_ode_cond(model, label)
+        images.append(sample)
+
+        # Plot
+        plt.figure()
+        plt.imshow(sample.raw().squeeze().numpy(), cmap="gray")
+        plt.title(f"Conditional Flow Matching Sample: {label}")
+        plt.axis("off")
+        plt.show()
 
 # -----------------------------
 # Trainings Loop
@@ -291,18 +459,20 @@ for epoch in range(global_epoch, global_epoch + num_epochs):
     model.train()
     total_loss = 0.0
 
-    for x1, y in train_loader:
-        x1, y = x1.to(device), y.to(device)
+    for x1_raw, y_raw in train_loader:
+        x1 = NamedTensor(x1_raw.to(device), (DIM_BATCH, DIM_CHANNEL, DIM_HEIGHT, DIM_WIDTH))
+        y = NamedTensor(y_raw.to(device), (DIM_BATCH,))
 
         # Zufällige Startverteilung
-        x0 = torch.randn_like(x1)
+        x0 = NamedTensor(torch.randn_like(x1.raw()), (DIM_BATCH, DIM_CHANNEL, DIM_HEIGHT, DIM_WIDTH))
 
         # Zufälliger Zeitpunkt t für jeden Batch-Eintrag, zwischen 0 und 1.
         # Wird für die lineare Interpolation zwischen x0 und x1 verwendet.
-        t = torch.rand(x1.size(0), 1, device = device)
+        t = NamedTensor(torch.rand(x1.raw().size(0), 1, device = device), (DIM_BATCH, DIM_TIME))
 
         # Lineare Interpolation zwischen x0 und x1
-        x_t = (1 - t.view(-1, 1, 1, 1)) * x0 + t.view(-1, 1, 1, 1) * x1
+        x_t = NamedTensor((1 - t.raw().view(-1, 1, 1, 1)) * x0.raw() + t.raw().view(-1, 1, 1, 1) * x1.raw(),
+                          (DIM_BATCH, DIM_CHANNEL, DIM_HEIGHT, DIM_WIDTH))
 
         # Zielgeschwindigkeitsvektor
         v_target = x1 - x0
@@ -311,7 +481,7 @@ for epoch in range(global_epoch, global_epoch + num_epochs):
         v_pred = model(x_t, t, y)
 
         # Loss: MESLoss
-        loss = criterion(v_pred, v_target)
+        loss = criterion(v_pred.raw(), v_target.raw())
 
         # Gradient zurücksetzen
         optimizer.zero_grad()
@@ -328,6 +498,8 @@ for epoch in range(global_epoch, global_epoch + num_epochs):
     print(f"Epoch {epoch + 1}/{total_epochs}, Loss: {avg_loss:.6f}")
 
     scheduler.step(avg_loss)
+
+    generate_image(model, 3)
 
     checkpoint_threshold = epoch + 1
     if checkpoint_threshold % 5 == 0:
@@ -349,12 +521,12 @@ def sample_flow_ode_cond(model, y_label, steps = 200, method = 'dopri5'):
     model.eval()
 
     # Zufällige Startverteilung
-    x0 = torch.randn(1, 1, 28, 28, device=device)
+    x0 = NamedTensor(torch.randn(1, 1, 28, 28, device=device), (DIM_BATCH, DIM_CHANNEL, DIM_HEIGHT, DIM_WIDTH))
 
     # Zeitspanne in steps einteilen
     t_span = torch.linspace(0.0, 1.0, steps, device = device)
 
-    y = torch.tensor([y_label], device = device)
+    y = NamedTensor(torch.tensor([y_label], device=device), (DIM_BATCH,))
 
     ode_func = ODEFunc(model, y)
 
@@ -362,11 +534,3 @@ def sample_flow_ode_cond(model, y_label, steps = 200, method = 'dopri5'):
 
     return x_sequence[-1].cpu()
 
-# -----------------------------
-# Bild Generierung
-# -----------------------------
-sample = sample_flow_ode_cond(model, y_label = 3)
-plt.imshow(sample.squeeze().numpy(), cmap="gray")
-plt.title("Conditional Flow Matching Sample: 3")
-plt.axis("off")
-plt.show()
