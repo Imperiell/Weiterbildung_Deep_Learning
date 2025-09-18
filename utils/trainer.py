@@ -49,5 +49,29 @@ class FeedbackTrainer:
     pass
 
 # Stubsen
-class FeedbackBoostTrainer:
-    pass
+class DeltaInjectionTrainer:
+
+
+    def inject_feedback_delta(main_model, feedback_model, base_model, alpha=0.5):
+        """
+        Überträgt die Änderungen aus dem Feedbackmodell ins Hauptmodell.
+
+        Args:
+            main_model: das aktuell normal trainierende Modell
+            feedback_model: Modell, das auf Feedbackdaten trainiert wurde
+            base_model: Kopie vom main_model VOR Feedbacktraining
+            alpha: Stärke des Feedbackeinflusses (0.0 - 1.0)
+        """
+        with torch.no_grad():
+            for main_param, fb_param, base_param in zip(
+                    main_model.parameters(),
+                    feedback_model.parameters(),
+                    base_model.parameters()
+            ):
+                delta = fb_param.data - base_param.data
+                main_param.data += alpha * delta
+
+        """base_model = copy.deepcopy(main_model)
+        feedback_model = copy.deepcopy(main_model)
+
+        inject_feedback_delta(main_model, feedback_model, base_model, alpha=0.3)"""

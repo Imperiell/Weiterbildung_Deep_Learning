@@ -40,7 +40,7 @@ params_dict = {
 scheduler = AdaptiveScheduler(optimizer, params_dict)
 trainer = Trainer(model, optimizer, scheduler, criterion, train_loader, device)
 
-num_epochs = 3
+num_epochs = 10
 
 # -----------------------------
 # Trainings Loop
@@ -61,11 +61,19 @@ total_epochs = global_epoch + num_epochs
 
 for epoch in range(global_epoch, total_epochs):
     avg_loss = trainer.train_epoch()
-    print(f"Epoch {epoch+1}/{num_epochs}, Loss={avg_loss:.6f}")
+    print(f"Epoch {epoch+1}/{total_epochs}, Loss={avg_loss:.6f}")
     trainer.generate_image([0,1,2], epoch)
 
     scheduler.step(avg_loss)
 
     checkpoint_threshold = epoch + 1
     if checkpoint_threshold % 5 == 0:
-        utils.save_checkpoint(model, optimizer, checkpoint_threshold, filepath)
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict()
+        }
+        torch.save(checkpoint, filepath)
+        print(f"Checkpoint saved at epoch {epoch + 1} -> {filepath}")
+
