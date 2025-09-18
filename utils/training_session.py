@@ -30,7 +30,7 @@ params_dict = {
     'lr_precision': 1e-5,
     'lr_warmup_start': 1e-3,
     'lr_human': 2e-4,
-    'warmup_steps': 10,
+    'warmup_steps': 30,
     'step_size': 2,
     'step_gamma': 0.5,
     'cosine_Tmax': 5,
@@ -40,7 +40,7 @@ params_dict = {
 scheduler = AdaptiveScheduler(optimizer, params_dict)
 trainer = Trainer(model, optimizer, scheduler, criterion, train_loader, device)
 
-num_epochs = 10
+num_epochs = 100
 
 # -----------------------------
 # Trainings Loop

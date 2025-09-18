@@ -468,7 +468,7 @@ model = DynamicUNet(1, 1, 32, 128, 10).to(device)
 criterion = nn.MSELoss()
 optimizer = optim.AdamW(model.parameters(), lr = 1e-4)
 
-num_epochs = 10
+num_epochs = 100
 
 filepath = './model/cfm_dynamic_unet_checkpoint.pth'
 
@@ -560,7 +560,7 @@ def keyboard_listener(event):
     feedback_flag = True
     print("Feedback-Flag aktiviert!")
 
-keyboard.on_press_key('space', keyboard_listener)
+# keyboard.on_press_key('space', keyboard_listener)
 # -----------------------------
 # Bild Generierung + Speichern
 # -----------------------------

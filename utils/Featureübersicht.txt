@@ -1,0 +1,25 @@
+NamedTensor Wrapper
+
+Sinusoidal Time Embeddings
+
+Residual Blocks
+
+Conditional Dynamic UNet
+
+ODE-basierte Integration
+
+Adaptive Learning Rate Scheduler
+
+Checkpointing & Partial Loading
+
+Dataset & DataLoader
+
+Loss & Optimizer
+
+Feedback-basiertes Delta-Training
+
+Bildgenerierung & Speicherung
+
+Batch-weise Zeitstempel (t) für Flow Matching
+Integration aller Module (NamedTensor, ResidualBlock, UNet, ODE, Scheduler)
+parametrisierbares Training via params_dict
